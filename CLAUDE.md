@@ -49,7 +49,7 @@ STM32G473VCT6 (170MHz) + FreeRTOS(CMSIS-RTOS2) + STM32CubeIDE 1.19 프로젝트.
 ## 10/2 회사에서 바뀐 것 (Claude 가 수정, 사용자가 집에서 다시 읽고 정리할 예정)
 
 - Y 배율 원인: Y 드라이브 H05_09 = 320 (1회전 320펄스) → `Y_PULSE 320`, `Y_GEAR 5`, `Y_PI 160`. X 는 `X_PI 100`. 원점 후 이동 Y `AM_Move(150, 50)`, X `IM_Move(100, 30)` (사용자 값).
-- 상태(status)는 W 대기 / R 운전 / I 원점 / P 일시정지 / A 알람 / N 초기상태(`INITIAL`)만. 만재·카드는 상태가 아니라 `full_1/2`, `card_ok_1/2` 변수로만 본다.
+- 상태(status)는 W 대기 / R 운전 / I 원점 / P 일시정지 / A 알람 / N 초기상태(10/7 부터 `RESTART`)만. 만재·카드는 상태가 아니라 `full_1/2`, `card_ok_1/2` 변수로만 본다.
 - **렉1 = 오른쪽 렉, 렉2 = 왼쪽 렉** (cmd.c PO 에서 rack 1 → right_x/right_y). 만재 핀 FULL_1_x · 경광등 _1 핀 · FDCAN1 = 렉1 (핀 이름 그대로 맞음). HMI 화면은 왼쪽 칸 = Sensor[0] 이라 `hmi.c` 에서 왼쪽 칸에 렉2, 오른쪽 칸에 렉1 을 넣는다. 같은 렉 안 R/Y 만 배선이 반대라 `lamp_rfid`/`lamp_manjae` 에서 바꿔 씀.
 - 긴급정지: 인터럽트는 깨우기만, `estop_event` 가 핀을 직접 읽음. 모든 대기(`wait_xy`, `wait_tilt`, 원점, CLI 이동)에 `if (estop == 1) return 0;`. 흐름: 긴급정지 → 알람 → 리셋(처음 상태 INITIAL) → 시작(원점).
 - HMI: ESP32 프로토콜(`STX '1' 'C' 작업 일시정지 알람 센서20 ETX`)에 맞춰 `hmi.c` 가 상태를 채워 보냄. 수동 버튼은 설정→수동(33)으로 수동 모드일 때만.
@@ -61,21 +61,66 @@ STM32G473VCT6 (170MHz) + FreeRTOS(CMSIS-RTOS2) + STM32CubeIDE 1.19 프로젝트.
 - 가감속(사용자 값): X `IM_ACC/DEC_MS 900`, Y `AM_ACC_DEC_MS 100`, TILT `TM_ACC/DEC_MS 200`.
 - X 토크 원점(사용자 값): `IM_HOME_HI_RPM 180`, `IM_HOME_LO_RPM 80`, `IM_HOME_ACC/DEC_MS 1000`, `IM_HOME_TIME_MS 20`, `IM_HOME_FORCE 35`. 목표 = "쾅 부딪히지 않고 살짝 닿으면 원점". 원칙: **토크(FORCE)만 낮추면 마찰·가속 토크에 오인식**(X 는 모터 2대라 한쪽만 먼저 잡히면 비틀림) → 먼저 **속도를 낮추고**, 판단 시간(TIME)은 너무 짧으면 순간 튀는 토크에 오인식. 지금 TIME 20ms 는 짧은 편이라 테스트로 확인 필요.
 
-### 남은 일 (집에서)
-1. 오늘 코드 읽고, 원하는 방식으로 직접 다시 쓰기 → Claude 리뷰 (작업 방식 7~8)
-2. **알람 상황 정하기** (데이터시트): 드라이브 알람 X/Y/TILT, 통신 끊김 몇 번이면 알람, 이동 30초 초과 → 위치 이탈(5/6/7)?, 원점 실패(10)? / 알람 후 램프·PC 이벤트·복구 방법
-3. **X 원점 살짝 닿기**: 원점 5~10번 반복해서 중간에 멈추는지(오인식) 확인 → 속도 먼저, 토크는 5씩, TIME 20ms 적당한지
-4. 긴급정지가 드라이브 / HMI 전원을 끊는지 확인 (끊으면 통신 시간 초과로 몇 초씩 버스가 막힘)
-5. 확인: HMI 센서 칸 위/아래 순서, PC 단 번호 1 = 만재 센서 1단(FULL_x_1)인지
-6. 덧붙인 것 정리 후보: `manual`, `done_text`, `home_text`, `tcp_mode/tcp_end`, `floor_full`, `Status_INIT`, 램프 R/Y 교체(배선 고치면)
+## 10/7 회사에서 바뀐 것 (event · hmi · run · status 정리, 일시정지 T/F/S/M)
 
-## 현재 상태 (2026-10-02 회사 버전 기준)
+- **안 쓰는 함수 삭제**: `AM_Speed/AM_Torque/AM_Read`, `IM_AlarmRead/IM_DIPRead/IM_Read`, `TM_Read`, `Home_lamp/Alarm_lamp`, `NET_Link`, run.c `Motor_Check`·`CHECK_COUNT`, event.h `Alarm_Set/Clear` 선언(본문은 event.c 에 주석으로 남김). 헤더도 같이 지움.
+- **상태 이름**: 초기상태 = `RESTART`(사용자가 INITIAL → RESTART 로 바꿈, CRC 레지스터 이름과 겹쳐서). 전원 켜지면 `status_1/2 = RESTART`. `Status_INIT()` 이 RESTART 로 만듦.
+- **S() 를 status.c 로**: S 는 "멈춰라 표시"만 (`Status_PAUSE` 두 렉 + `pause_why='M'` + PC 알림). 모터를 바로 세우지 않음. MI/MO 는 도착 후, PO 는 쏟기 전·복귀 전에 멈춤.
+- **hmi.c**: 보낼 27바이트 틀 `tx` 를 static 으로 미리 채우고 바뀌는 11칸만 씀. 버튼 = `rx[2] - '0'`. `hmi_pause` 가 `pause_why` 대로 1 시딩월 / 2 만재 / 3 틸트 / 4 사용자.
+- **event.c hmi_event**: 수동 버튼(21~26)은 `manual == 1` 일 때만. RUN = 초기상태면 `Status_HOME`(→ Motor_Task 가 원점), 일시정지 M·T 면 풀기. STOP → `S()`. RESET → 알람 리셋 + 초기상태. 설정→수동(33) 토글.
+- **긴급정지 EXTI 콜백**: 주석 처리돼 있어서 긴급정지가 이동 끝난 뒤에야 먹던 것 → 사용자가 주석 풂 (테스트 필요).
+- **manjae.c**: `floor_full(rack, dan)` 공개(manjae.h). `Full_Read` 는 `GPIOE->IDR & 0x7F80` 으로 만재 8칸 한 번에 읽고 바뀔 때만 나눔.
+- **PO 일시정지 (T/F/S/M)**: run.c PO = 이동 → `PO_event(rack, y_no, 1)` → Y 올리며 틸트 → `touch = PO_pour(…)` → `PO_event(rack, y_no, touch)` → 복귀. `PO_pour`/`PO_event` 는 event.c 에 있지만 **Motor_Task 가 실행**.
 
-- 완료: UART2 DMA 통신, 시간 제한, 이동 중 명령 거부, UART4_Xfer, event.c(긴급정지, 램프, 만재 EXTI, HMI), S 일시정지, CLI INIT, **긴급정지 중 즉시 중단(estop 확인)**, HMI 상태 표시(ESP32 프로토콜), TCP 이벤트 · 완료응답 · LL 램프, RFID CAN(0.5초 질문 / 2초 판정).
-- 9/28 리뷰 할 일 중 해결: 긴급정지 후 Motor_Task 중단, HMI 버튼 번호(한 바이트라 문제 없었음). 남음: UART4 플래그 비교 `& XFER_DONE`, 버퍼 길이 검사.
-- 터치패드: JC3248W535C (ESP32-S3, 3.5" 320x480). 소스는 하이웍스 HMI.zip (HMI_JC3248W535_v1.2, `serial1.cpp` HMI_Parser 가 프로토콜). Sensor[0] = 화면 왼쪽.
+  | 이유 | 언제 | 풀기 | HMI |
+  |---|---|---|---|
+  | T 틸트 | 쏟는 동안 그 단 센서에 한 번도 안 닿음 | HMI RUN | 3 |
+  | F 만재 | 그 단 만재 | 센서 풀리면 자동 / PC `01D` | 2 |
+  | S 시딩월 | 그 렉 카드 없음 | 카드 들어오면 자동 | 1 |
+  | M 사용자 | STOP 버튼 / S 명령 | HMI RUN | 4 |
+- **cmd.c**: `CMD_D ('D' << 8)` 추가 — 만재(F)로 멈춘 것만 억지로 풀기.
+- 이름 정리: `full_new/pause_new` → `full_event_on/pause_event_on`.
+- 미룸: TM `GO_ABS 0x03 → 0x07`(움직이는 중 새 목표 받기, 틸트 즉시 멈춤·재개용) — 사용자가 직접 고쳐 볼 예정. TCP W6100 인터럽트 · CAN 은 다음 주.
+
+### 10/7 결론 : 구조가 마음에 안 듦 → 집에서 "왜 이렇게 짰나" 공부부터
+
+사용자 생각: **10/2 코드는 Claude 가 거의 다 짠 것**이라 내 코드가 아니다. 앞으로는 **내가 구조를 짜고 싶고, 어떻게 짜야 하는지 알면서** 하고 싶다.
+특히 고쳐야 할 것 같은 곳: **status.c, run.c (Motor_Run), cmd.c**.
+
+- Motor_Run 이 지저분한 이유(10/7 에 본 것): 켜질 때 원점 / HMI RUN 원점 / 큐 명령 3가지 일을 한 함수에서 함. 원점 길이 3개(켜질 때·HMI = `motor_basic_init`, PC·CLI 의 I = `I()` 만)로 다름. 시작·끝 상태를 `cmd.command == CMD_…` 로 명령마다 따로 정함 (MI→W, MO→R 유지, PO→W).
+- Claude 가 낸 안 2개는 **사용자가 거절**: ① `home_run`/`cmd_run` 새 함수 ("I 함수가 있는데 왜 또 함수를"), ② `cmd.command ==` 줄을 옮기는 안 ("커멘드들이 보기 싫다"). → 다음엔 사용자가 구조를 먼저 짜고 Claude 는 설명·리뷰만.
+- 상태(status)를 바꾸는 곳이 흩어져 있음: run.c(Motor_Run), event.c(hmi_event, PO_event, estop_event), status.c(S), cmd.c(D). status.c 를 어떻게 할지 사용자가 정할 것.
+
+**집에서 할 수업 (다음 세션 첫 일)**: 파일마다, **함수마다** 아래를 자세히 설명.
+1. 이 함수가 하는 일 (한 줄) + 누가 부르나 / 어느 태스크가 실행하나
+2. **왜 이렇게 짰나** (다른 방법과 비교, 장단점)
+3. 그림 (호출 흐름, 시간 흐름, 메모리 · 버스)
+4. 나오는 **C 개념** (static, volatile, extern, 구조체 값 전달, 포인터, `'0'` 빼기, 비트 마스크 `& 0x7F80`, `<< 8` 등)
+5. 나오는 **펌웨어 개념** (태스크 · 우선순위, 큐, 스레드 플래그, 뮤텍스, DMA, IDLE 인터럽트, EXTI, Modbus RTU, 폴링 vs 인터럽트, 시간 제한)
+6. CPU / 버스 / RAM 을 얼마나 쓰나
+
+순서 추천: status → run → event → cmd → hmi → net → 모터(i/a/t_motor) → manjae · rfid · lamp → usart.c USER CODE (UART2_Xfer, UART4_Xfer).
+
+### 남은 일
+0. **빌드 전 꼭**: `app_freertos.c` Start_Motor_Task 168줄 `PO_event(rack, dan, touch);` 삭제 (모르는 변수라 빌드 에러, `Motor_Run()` 은 안 끝나서 실행도 안 됨). Motor_Task 는 `Motor_Run();` 하나면 됨.
+1. 위 수업 → 사용자가 status / run / cmd 구조 직접 설계 → Claude 리뷰 (작업 방식 7~8)
+2. 정해야 할 것: CMD_S `S_1` 만 받음(렉 번호인데 S 는 두 렉 다 멈춤 — `S_1`/`S_2` 다 받기?), hmi.h 버튼 이름을 ESP 와 맞추기(ESP 12 = 일시정지인데 이름 `BTN_STOP`), 수동 버튼이 `AM_Pos` 등 실패를 안 봄(실패면 now = 0 → 0 근처로 이동 위험), 램프 규칙을 lamp.c 로, `Status_RUN` 이 PAUSE 를 덮는 경우, MO 도착 후 R 유지 이유
+3. 테스트: 긴급정지 즉시 멈춤(EXTI 주석 푼 뒤), T 오인식(쏟는 시간 `return_delay*10` 이 짧으면 정상인데 T), F 풀린 뒤 카드 다시 안 봄, PC `01D`
+4. GO_ABS 0x07 (틸트 즉시 멈춤 · 재개)
+5. **알람 상황 정하기** (데이터시트): 드라이브 알람 X/Y/TILT, 통신 끊김 몇 번이면 알람, 이동 30초 초과 → 위치 이탈(5/6/7)?, 원점 실패(10)? / 알람 후 램프·PC 이벤트·복구 방법
+6. **X 원점 살짝 닿기**: 원점 5~10번 반복해서 중간에 멈추는지(오인식) 확인 → 속도 먼저, 토크는 5씩, TIME 20ms 적당한지
+7. 긴급정지가 드라이브 / HMI 전원을 끊는지 확인 (끊으면 통신 시간 초과로 몇 초씩 버스가 막힘)
+8. 확인: HMI 센서 칸 위/아래 순서, PC 단 번호 1 = 만재 센서 1단(FULL_x_1)인지
+9. 다음 주: TCP W6100 인터럽트, CAN
+
+## 현재 상태 (2026-10-07 회사 버전 기준, 사용자가 git 에 올릴 예정)
+
+- 완료: UART2 DMA 통신, 시간 제한, 이동 중 명령 거부, UART4_Xfer, event.c(긴급정지, 램프, 만재 EXTI, HMI), S 일시정지(표시만), CLI INIT, 긴급정지 중 즉시 중단(estop 확인), HMI 상태 표시(ESP32 프로토콜, 일시정지 이유 포함), TCP 이벤트 · 완료응답 · LL 램프 · D, RFID CAN(0.5초 질문 / 2초 판정), PO 일시정지 T/F/S/M, 안 쓰는 함수 삭제.
+- 문법 검사 통과 (run / event / cmd / hmi / manjae / status). 보드 테스트는 아직. app_freertos.c 168줄은 위 남은 일 0번.
+- 9/28 리뷰 남음: UART4 플래그 비교 `& XFER_DONE`, 버퍼 길이 검사.
+- 터치패드: JC3248W535C (ESP32-S3, 3.5" 320x480). 소스는 하이웍스 HMI.zip (HMI_JC3248W535_v1.2, `serial1.cpp` HMI_Parser 가 프로토콜). Sensor[0] = 화면 왼쪽. ESP 작업: 0 초기 1 대기 2 운전 3 일시정지 4 정지 5 원점 6 알람 / 일시정지: 0 없음 1 시딩월 2 만재 3 틸트 4 사용자.
 - 아직: 알람(ALARM_* 번호 / Alarm_Set), UART1 CLI 폴링, W6100 1ms 폴링.
-- 노션 정리: 코텍전자 → [10/02](https://app.notion.com/p/3ed10d3ee54481fb9d0fc4639a4e600b).
+- 노션 정리: 코텍전자 → [10/02](https://app.notion.com/p/3ed10d3ee54481fb9d0fc4639a4e600b). 10/7 은 아직.
 
 ## 일정 (마감 2026-10-14, 10/5·10/6(예비군)·10/9 휴무, 매일 19시까지)
 
